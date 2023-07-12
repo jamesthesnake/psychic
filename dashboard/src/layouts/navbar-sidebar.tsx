@@ -1,11 +1,12 @@
 import { Footer } from "flowbite-react";
 import type { FC, PropsWithChildren } from "react";
-import Navbar from "../components/navbar";
-import Sidebar from "../components/sidebar";
+import Navbar from "../navigation/navbar";
+import Sidebar from "../navigation/sidebar";
 import { MdFacebook } from "react-icons/md";
 import { FaDribbble, FaGithub, FaInstagram, FaTwitter } from "react-icons/fa";
 import { SidebarProvider, useSidebarContext } from "../context/SidebarContext";
 import classNames from "classnames";
+import Text from "../components/text";
 
 interface NavbarSidebarLayoutProps {
   isFooter?: boolean;
@@ -28,13 +29,14 @@ const MainContent: FC<PropsWithChildren<NavbarSidebarLayoutProps>> = function ({
   children,
   isFooter,
 }) {
-  const { isOpenOnSmallScreens: isSidebarOpen } = useSidebarContext();
+  const { isOpenOnSmallScreens: isSidebarOpen, isPageWithSidebar } =
+    useSidebarContext();
 
   return (
     <main
       className={classNames(
         "overflow-y-auto relative w-full h-full bg-gray-50 dark:bg-gray-900",
-        isSidebarOpen ? "lg:ml-16" : "lg:ml-64"
+        !isPageWithSidebar ? "lg:ml-0" : isSidebarOpen ? "lg:ml-16" : "lg:ml-64"
       )}
     >
       {children}
@@ -103,9 +105,9 @@ const MainContentFooter: FC = function () {
           </Footer.LinkGroup>
         </div>
       </Footer>
-      <p className="my-8 text-center text-sm text-gray-500 dark:text-gray-300">
+      <Text className="my-8 text-center text-sm text-gray-500 dark:text-gray-300">
         &copy; 2019-2022 Flowbite.com. All rights reserved.
-      </p>
+      </Text>
     </>
   );
 };
