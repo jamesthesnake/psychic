@@ -1,4 +1,13 @@
-from models.models import AppConfig, Document, ConnectorId, DataConnector, AuthorizationResult
+from models.models import (
+    AppConfig,
+    Document,
+    ConnectorId,
+    DocumentConnector,
+    AuthorizationResult,
+    ConnectionFilter,
+    Section,
+)
+from models.api import GetDocumentsResponse
 from typing import List, Optional
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -10,27 +19,36 @@ import uuid
 import json
 import importlib
 from typing import Any, Dict
-import io 
+import io
 from PyPDF2 import PdfReader
 import re
 from collections import deque
+from .google_drive_parser import GoogleDriveParser
 
 
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
-def download_pdf(service, file_id):
-    request = service.files().get_media(fileId=file_id)
-    file = io.BytesIO(request.execute())
+
+def download_pdf(service, file_id) -> Optional[io.BytesIO]:
+    file = None
+    try:
+        request = service.files().get_media(fileId=file_id)
+        file = io.BytesIO(request.execute())
+    except Exception as e:
+        print(e)
+
     return file
+
 
 def extract_pdf_text(pdf_file):
     reader = PdfReader(pdf_file)
-    text = ''
+    text = ""
     for page_num in range(len(reader.pages)):
         text += reader.pages[page_num].extract_text()
     return text
 
-class GoogleDriveConnector(DataConnector):
+
+class GoogleDriveConnector(DocumentConnector):
     connector_id: ConnectorId = ConnectorId.gdrive
     config: AppConfig
 
@@ -38,146 +56,208 @@ class GoogleDriveConnector(DataConnector):
         super().__init__(config=config)
 
     async def authorize_api_key(self) -> AuthorizationResult:
-        pass              
+        pass
 
-    async def authorize(self, connection_id: str, auth_code: Optional[str], metadata: Dict) -> AuthorizationResult:
-        client_secrets = StateStore().get_connector_credential(self.connector_id, self.config)
+    async def authorize(
+        self, account_id: str, auth_code: Optional[str], metadata: Dict
+    ) -> AuthorizationResult:
+        cred = StateStore().get_connector_credential(self.connector_id, self.config)
+        try:
+            custom_config = StateStore().get_connector_custom_config(
+                self.connector_id, self.config
+            )
+        except Exception as e:
+            print(e)
+            custom_config = None
+
+        client_secrets = cred["client_secrets"]
+        developer_key = cred["developer_key"]
+
+        redirect_uri = client_secrets["web"]["redirect_uris"][0]
+
+        if custom_config and custom_config.get("scope"):
+            scopes = custom_config["scope"]
+        else:
+            scopes = SCOPES
+
+        # if settings.connector_configs and settings.connector_configs.get(self.connector_id):
+        #     gdrive_configs = settings.connector_configs[self.connector_id]
+        #     if gdrive_configs.get('folder_selection'):
+        #         scopes = SCOPES_READONLY
 
         flow = InstalledAppFlow.from_client_config(
-            client_secrets,
-            SCOPES, 
-            redirect_uri="https://link.psychic.dev/oauth/redirect"
+            client_secrets, scopes, redirect_uri=redirect_uri
         )
-        
+
         if not auth_code:
-            auth_url, _ = flow.authorization_url(prompt='consent')
+            auth_url, _ = flow.authorization_url(prompt="consent")
             return AuthorizationResult(authorized=False, auth_url=auth_url)
-        
+
         flow.fetch_token(code=auth_code)
         # Build the Google Drive API client with the credentials
         creds = flow.credentials
         creds_string = creds.to_json()
-        folder_url = metadata['folder_url']
-        folder_id = get_id_from_url(folder_url)
 
         new_connection = StateStore().add_connection(
             config=self.config,
-            credential=creds_string,
+            credential=None,
             connector_id=self.connector_id,
-            connection_id=connection_id,
-            metadata={
-                'folder_id': folder_id,
+            account_id=account_id,
+            metadata={},
+            new_credential=creds_string,
+        )
+        new_connection.credential = json.dumps(
+            {
+                "access_token": creds.token,
+                "client_id": creds.client_id,
+                "developer_key": developer_key,
             }
         )
         return AuthorizationResult(authorized=True, connection=new_connection)
 
-
-    async def load(self, connection_id: str) -> List[Document]:
-        # initialize credentials
+    async def get_sections(self, account_id: str) -> List[Section]:
         connection = StateStore().load_credentials(
-            self.config, 
-            self.connector_id,
-            connection_id 
+            self.config, self.connector_id, account_id
         )
 
         credential_string = connection.credential
-        folder_id = connection.metadata['folder_id']
 
         credential_json = json.loads(credential_string)
-        creds = Credentials.from_authorized_user_info(
-            credential_json
+        creds = Credentials.from_authorized_user_info(credential_json)
+        service = build("drive", "v3", credentials=creds)
+
+        parser = GoogleDriveParser(service)
+
+        sections = parser.list_all_subfolders()
+
+        return sections
+
+    async def load(self, connection_filter: ConnectionFilter) -> GetDocumentsResponse:
+        account_id = connection_filter.account_id
+        uris = connection_filter.uris
+        section_filter = connection_filter.section_filter_id
+        # initialize credentials
+        connection = StateStore().load_credentials(
+            self.config, self.connector_id, account_id
         )
+
+        credential_string = connection.credential
+
+        credential_json = json.loads(credential_string)
+        creds = Credentials.from_authorized_user_info(credential_json)
 
         if not creds.valid and creds.refresh_token:
             creds.refresh(Request())
             creds_string = creds.to_json()
             StateStore().add_connection(
-                config=self.config,
+                config=connection.config,
                 credential=creds_string,
                 connector_id=self.connector_id,
-                connection_id=connection_id,
-                metadata={
-                    'folder_id': folder_id,
-                }
+                account_id=account_id,
+                metadata={},
             )
-        service = build('drive', 'v3', credentials=creds)
+        service = build("drive", "v3", credentials=creds)
 
+        parser = GoogleDriveParser(service)
 
-        # List the files in the specified folder
-        results = service.files().list(q=f"'{folder_id}' in parents and trashed = false",
-                                    fields="nextPageToken, files(id, name, webViewLink)").execute()
-        items = results.get('files', [])
+        # folder_contents = parser.list_files_in_folder(folder_id)
+        # if len(folder_contents) == 0:
+        #     raise Exception("Folder is empty")
 
-        if len(items) == 0:
-            raise Exception("Folder is empty")
-        
-        return get_documents_from_folder(service, folder_id)
+        connection_filter = ConnectionFilter(
+            connector_id=self.connector_id, account_id=account_id
+        )
+        connections = StateStore().get_connections(
+            filter=connection_filter,
+            config=self.config,
+        )
+        connection = connections[0]
+        filters = connection.section_filters
+        default_filter = None
 
-def list_files_in_folder(service, folder_id):
-    query = f"'{folder_id}' in parents"
-    results = service.files().list(q=query, fields="nextPageToken, files(id, name, mimeType, webViewLink)").execute()
-    items = results.get("files", [])
-    return items
+        if filters:
+            for filter in filters:
+                if filter.id == "__default__":
+                    default_filter = filter
+                    break
 
-def get_documents_from_folder(service, folder_id) -> List[Document]:
-    documents: List[Document] = []
-    folders_to_process = deque([folder_id])
+        files = []
+        if uris:
+            files = parser.get_files_by_uris(uris)
+        elif section_filter:
+            # retrieve the SectionFilter based on the section_filter id
 
-    while folders_to_process:
-        current_folder = folders_to_process.popleft()
-        items = list_files_in_folder(service, current_folder)
+            # get the filter with the right id
+            sections = []
+            for filter in filters:
+                if filter.id == section_filter:
+                    sections = filter.sections
 
-        for item in items:
-            mime_type = item.get("mimeType", "")
+            for section in sections:
+                files.extend(parser.get_all_files(section))
 
-            if mime_type == "application/vnd.google-apps.folder":
-                folders_to_process.append(item["id"])
-            elif mime_type in ["application/vnd.google-apps.document", "application/pdf"]:
-                # Retrieve the full metadata for the file
-                file_metadata = service.files().get(fileId=item["id"]).execute()
-                mime_type = file_metadata.get("mimeType", "")
-
-                if mime_type == "application/vnd.google-apps.document":
-                    doc = service.files().export(fileId=item["id"], mimeType="text/plain").execute()
-                    content = doc.decode("utf-8")
-                elif mime_type == "application/pdf":
-                    pdf_file = download_pdf(service, item["id"])
-                    content = extract_pdf_text(pdf_file)
-
-                documents.append(
-                    Document(
-                        title=item["name"],
-                        content=content,
-                        uri=item["webViewLink"],
-                    )
-                )
+        else:
+            if default_filter:
+                for section in default_filter.sections:
+                    files.extend(parser.get_all_files(section))
             else:
-                print(f"Unsupported file type: {mime_type}")
+                files = []
 
-    return documents
+        documents = []
+        for item in files:
+            mime_type = item.get("mimeType", "")
+            if mime_type == "application/vnd.google-apps.document":
+                doc = (
+                    service.files()
+                    .export(fileId=item["id"], mimeType="text/plain")
+                    .execute()
+                )
+                content = doc.decode("utf-8")
+            elif mime_type == "application/pdf":
+                pdf_file = download_pdf(service, item["id"])
+                if not pdf_file:
+                    continue
+                content = extract_pdf_text(pdf_file)
+            documents.append(
+                Document(
+                    title=item["name"],
+                    content=content,
+                    connector_id=self.connector_id,
+                    account_id=account_id,
+                    uri=item["webViewLink"],
+                )
+            )
+        return GetDocumentsResponse(documents=documents)
+
 
 def get_id_from_folder_name(folder_name: str, service) -> str:
     print("loading documents")
     folder_query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
-    folder_result = service.files().list(q=folder_query, fields="nextPageToken, files(id)").execute()
-    folder_items = folder_result.get('files', [])
+    folder_result = (
+        service.files()
+        .list(q=folder_query, fields="nextPageToken, files(id)")
+        .execute()
+    )
+    folder_items = folder_result.get("files", [])
     print("folder items:", folder_items)
 
     if len(folder_items) == 0:
         print(f"No folder named '{folder_name}' was found.")
         raise Exception(f"No folder named '{folder_name}' was found.")
     elif len(folder_items) > 1:
-        print(f"Multiple folders named '{folder_name}' were found. Using the first one.")
+        print(
+            f"Multiple folders named '{folder_name}' were found. Using the first one."
+        )
 
-    folder_id = folder_items[0]['id']
+    folder_id = folder_items[0]["id"]
     return folder_id
+
 
 def get_id_from_url(url: str):
     # Extract the folder ID from the link
-    folder_id = re.search(r'folders/([\w-]+)', url)
+    folder_id = re.search(r"folders/([\w-]+)", url)
     if folder_id:
         folder_id = folder_id.group(1)
         return folder_id
     else:
         raise Exception("Invalid Google Drive folder link.")
-    
