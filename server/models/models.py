@@ -10,6 +10,7 @@ class ConnectorId(StrEnum):
     confluence = "confluence"
     dropbox = "dropbox"
     gdrive = "gdrive"
+    github = "github"
     gmail = "gmail"
     hubspot = "hubspot"
     intercom = "intercom"
@@ -70,6 +71,7 @@ class Connection(BaseModel):
 class ConnectorStatus(BaseModel):
     is_enabled: bool
     custom_credentials: Optional[Dict]
+    custom_config: Optional[Dict]
     connections: List[Connection] = []
     redirect_uris: Optional[List[str]] = []
 
