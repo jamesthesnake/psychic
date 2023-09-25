@@ -64,11 +64,13 @@ class ZendeskConnector(DocumentConnector, TicketConnector):
         except Exception as e:
             raise Exception("Connector is not enabled")
 
+        scopes = "read"
+        if self.config.app_id == "15edc3c2-ec0d-429a-ad1c-497aea3d7384":
+            scopes = "hc:read"
+
         if not auth_code:
             auth_url = f"https://{subdomain}.zendesk.com/oauth/authorizations/new"
-            scopes = "read"
-            if self.config.app_id == "15edc3c2-ec0d-429a-ad1c-497aea3d7384":
-                scopes = "hc:read"
+            
             params = {
                 "response_type": "code",
                 "redirect_uri": redirect_uri,
@@ -99,7 +101,7 @@ class ZendeskConnector(DocumentConnector, TicketConnector):
                 "client_id": client_id,
                 "client_secret": client_secret,
                 "redirect_uri": redirect_uri,
-                "scope": "hc:read tickets:read",
+                "scope": scopes,
             }
 
             response = requests.post(
@@ -211,25 +213,31 @@ class ZendeskConnector(DocumentConnector, TicketConnector):
 
         parser = ZendeskParser(subdomain, credential_json)
 
-        raw_tickets, next_page_cursor = parser.get_all_tickets(
-            None, connection_filter.page_cursor
-        )
-
         tickets = []
-        for raw_ticket in raw_tickets:
-            content = raw_ticket["content"]
-
-            if redact_pii:
-                pii_redactor = PIIRedactor()
-                content = pii_redactor.redact(content)
-            tickets.append(
-                Document(
-                    title=raw_ticket["title"],
-                    content=content,
-                    connector_id=self.connector_id,
-                    account_id=account_id,
-                    uri=raw_ticket["uri"],
-                )
+        next_page_cursor = None
+        while True:
+            raw_tickets, next_page_cursor = parser.get_all_tickets(
+                None, next_page_cursor
             )
+
+            for raw_ticket in raw_tickets:
+                content = raw_ticket["content"]
+
+                if redact_pii:
+                    pii_redactor = PIIRedactor()
+                    content = pii_redactor.redact(content)
+                tickets.append(
+                    Document(
+                        title=raw_ticket["title"],
+                        content=content,
+                        connector_id=self.connector_id,
+                        account_id=account_id,
+                        uri=raw_ticket["uri"],
+                    )
+                )
+
+            # Break the loop if there is no next page
+            if not next_page_cursor:
+                break
 
         return GetTicketsResponse(tickets=tickets, next_page_cursor=next_page_cursor)
